@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
 
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
 #
 # This script is supposed to be able to check and fix "Vendor Hash File" found
 # on some recent Lenovo ThinkPad UEFI ROMs. Vendor Hash File is special UEFI
@@ -88,7 +101,7 @@ for binary in binaries:
     if not os.path.exists(binary):
         get_binary(binary, binaries[binary]['rel'], binaries[binary]['md5'])
 
-# Complete extract of an input ROM file
+# Do a complete extract of an input ROM file
 print('Extracting', args.inputrom, 'into', args.inputrom + '.dump ...')
 os.system('./UEFIExtract ' + args.inputrom + ' all')
 
