@@ -18,4 +18,5 @@ This script uses UEFITools binaries to do the heavy lifting of extracting and
 FFSv2 and replacing Vendor Hash File modules. It will download UEFIExtract
 and UEFIReplace binaries unless they are already in the working directory.
 
-Tested on ThinkPad A285.
+Works on Linux, Windows & macOS (untested). Tested against ThinkPad A285 UEFI
+ROM image.

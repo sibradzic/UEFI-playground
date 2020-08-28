@@ -26,14 +26,11 @@ import os
 import stat
 import sys
 import urllib.request
-from glob import glob
 from shutil import rmtree
 from zipfile import ZipFile
 
-VENDOR_NAMEID = 'Phoenix hash file'
 VENDOR_UUID = '389CC6F2-1EA8-467B-AB8A-78E769AE2A15'
 GITHUB_PREFIX = 'https://github.com/LongSoft/UEFITool/releases/download/'
-UEFITools_PLATFORM = 'linux_x86_64'
 binaries = {
     'UEFIExtract': {
         'rel': 'NE_A57',
@@ -44,6 +41,19 @@ binaries = {
         'md5':  'a816ee512d76d5556761fc8749a29267'
     }
 }
+
+# Determine system platform
+bin_suffix = ''
+if sys.platform == 'linux':
+    platform = 'linux_x86_64'
+elif sys.platform == 'win32':
+    platform = sys.platform
+    bin_suffix = '.exe'
+elif sys.platform == 'darwin':
+    platform = 'mac'
+else:
+    print('Unsupported platform', sys.platform)
+    sys.exit(2)
 
 
 # Helper that returns a hash of a binary file
@@ -64,67 +74,53 @@ def file_hash(binfile, algo):
 # Helper for fetching UEFITools binaries
 def get_binary(name, release, md5):
     full_url = GITHUB_PREFIX + release.lstrip('NE_') + '/' + name + '_' + \
-               release + '_' + UEFITools_PLATFORM + '.zip'
+               release + '_' + platform + '.zip'
     print('Downloading', full_url)
     urllib.request.urlretrieve(full_url, name + '.zip')
     print('Extracting', name + '.zip ...')
     zip = ZipFile(name + '.zip')
     zip.extractall()
-    if file_hash(name, 'md5') == md5:
-        os.chmod(name, stat.S_IRWXU)
-        os.remove(name + '.zip')
-    else:
+    zip.close()
+    os.remove(name + '.zip')
+    os.chmod(name + bin_suffix, stat.S_IRWXU)
+    # TODO: md5 checks on win32 & darwin platforms
+    if platform == 'linux' and file_hash(name, 'md5') != md5:
         print(name, 'md5 sum does not match', md5)
         sys.exit(2)
 
 
-parser = argparse.ArgumentParser(description='Lenovo ROM shenannigans')
+parser = argparse.ArgumentParser(description='UEFI Vendor hash fixer')
 parser.add_argument('inputrom', help='Input ROM file')
 args = parser.parse_args()
 
 # Get UEFITool binaries (unless they are already present in the working dir)
 for binary in binaries:
-    if not os.path.exists(binary):
+    if not os.path.exists(binary + bin_suffix):
         get_binary(binary, binaries[binary]['rel'], binaries[binary]['md5'])
 
 # Do a complete extract of an input ROM file
 print('Extracting', args.inputrom, 'into', args.inputrom + '.dump ...')
-os.system('./UEFIExtract ' + args.inputrom + ' all')
+os.system('./UEFIExtract ' + args.inputrom + ' report')
 
 print('Calculating sha256 hashes of FFSv2 folumes ...')
 ffsv2_vols = {}
 with open(args.inputrom + '.report.txt') as report:
     for line in report:
-        if 'FFSv2' in line and 'N/A' not in line:
+        if ('FFSv2' in line or VENDOR_UUID in line) and 'N/A' not in line:
             entries = line.strip().split('|')
-            baseaddr = entries[2].strip().lstrip('0')
+            baseaddr_hex_str = entries[2].strip().lstrip('0')
+            baseaddr = int(baseaddr_hex_str, 16)
+            size = int(entries[3].strip().lstrip('0'), 16)
             vol_uuid = entries[5].split('- ')[-1]
-            glob_path_prefix = args.inputrom + '.dump/**/*' + vol_uuid
-            all_dirs = glob(glob_path_prefix, recursive=True)
-            match_ffsv2dir = None
-            for ffsv2dir in all_dirs:
-                with open(ffsv2dir + '/info.txt') as info:
-                    for ln in info:
-                        if 'Base' in ln:
-                            base = ln.strip().split(': ')[-1].rstrip('h')
-                            if base == baseaddr:
-                                match_ffsv2dir = ffsv2dir
-            if match_ffsv2dir:
-                with open(match_ffsv2dir + '/header.bin', 'rb') as header, \
-                        open(match_ffsv2dir + '/body.bin', 'rb') as body, \
-                        open(match_ffsv2dir + '/full.bin', 'wb') as target:
-                    target.write(header.read())
-                    target.write(body.read())
-                ffsv2sha256 = file_hash(match_ffsv2dir + '/full.bin', 'sha256')
-                ffsv2_vols[baseaddr] = ffsv2sha256
-
-vendor_path = glob(args.inputrom + '.dump/**/*' + VENDOR_NAMEID + '/',
-                   recursive=True)[0]
-vendor_hashfile = vendor_path + 'body.bin'
-
-if vendor_hashfile:
-    with open(vendor_hashfile, mode='rb') as file:
-        hash_body_bytes = file.read()
+            with open(args.inputrom, 'rb') as uefi_image:
+                uefi_image.seek(baseaddr, 0)
+                module_data = uefi_image.read(size)
+            if 'FFSv2' in line:
+                ffsv2sha256 = hashlib.sha256(module_data)
+                ffsv2_vols[baseaddr_hex_str] = ffsv2sha256.hexdigest()
+            if VENDOR_UUID in line:
+                hash_header_bytes = module_data[:24]
+                hash_body_bytes = module_data[24:]
 
 
 # Classes defining C structure data in vendor hash table
@@ -180,9 +176,8 @@ for record in hashes.records:
             fix_needed = True
 
 if fix_needed:
-    with open(vendor_path + '/header.bin', 'rb') as header, \
-         open('vendor_modified.bin', 'wb') as target:
-        target.write(header.read())
+    with open('vendor_modified.bin', 'wb') as target:
+        target.write(hash_header_bytes)
         target.write(hashes)
     print('Replacing vendor hash module')
     os.system('./UEFIReplace ' + args.inputrom + ' ' + VENDOR_UUID +
@@ -190,7 +185,6 @@ if fix_needed:
     print('Fixed ROM image written as', args.inputrom + '.patched')
 
 # cleanup
-rmtree(args.inputrom + '.dump')
 try:
     os.remove(args.inputrom + '.report.txt')
     os.remove('vendor_modified.bin')
