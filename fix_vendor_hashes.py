@@ -104,39 +104,31 @@ print('Generating structure report of', args.inputrom)
 os.system('./UEFIExtract ' + args.inputrom + ' report')
 
 print('Calculating sha256 hashes of FFS volumes ...')
-ffsv2_vols = {}
+ffs_vols = {}
 hash_tables = {}
-UEFI_base_addr = 0
 with open(args.inputrom + '.report.txt') as report:
+    if args.debug:
+        print('DEBUG: FFS volumes reported by UEFIExtract:')
     for line in report:
         entries = line.strip().split('|')
-        if 'BIOS region' in line:
-            BIOS_region_base_hex_str = entries[2].strip().lstrip('0')
-            UEFI_base_addr = int(BIOS_region_base_hex_str, 16)
-            if args.debug:
-                print(('DEBUG: UEFI BIOS region base address: '
-                       '{:X}').format(UEFI_base_addr, UEFI_base_addr))
-                print('DEBUG: FFS volumes:')
         if ('FFSv' in line or VENDOR_UUID in line) and 'N/A' not in line:
             baseaddr = int(entries[2].strip().lstrip('0'), 16)
-            real_offset = baseaddr - UEFI_base_addr
-            baseaddr_hex_str = '{:X}'.format(real_offset)
+            baseaddr_hex_str = '{:X}'.format(baseaddr)
             size = int(entries[3].strip().lstrip('0'), 16)
             vol_uuid = entries[5].split('- ')[-1]
             with open(args.inputrom, 'rb') as uefi_image:
                 uefi_image.seek(baseaddr, 0)
                 module_data = uefi_image.read(size)
             if 'FFSv' in line:
-                ffsv2sha256 = hashlib.sha256(module_data)
-                ffsv2_vols[baseaddr_hex_str] = ffsv2sha256.hexdigest()
+                ffssha256 = hashlib.sha256(module_data)
+                ffs_vols[baseaddr_hex_str] = ffssha256.hexdigest()
                 if args.debug:
                     print(('DEBUG: @ {:7X}h sha256: '
-                           '{}').format(real_offset,
-                                        ffsv2_vols[baseaddr_hex_str]))
+                           '{}').format(baseaddr, ffs_vols[baseaddr_hex_str]))
             if VENDOR_UUID in line:
                 if args.debug:
                     print(('DEBUG: @ {:7X}h {} bytes long vendor hash table'
-                           '').format(real_offset, size))
+                           '').format(baseaddr, size))
                 hash_tables[baseaddr_hex_str] = {
                   'header': module_data[:24],
                   'body': module_data[24:],
@@ -188,24 +180,55 @@ rwbytes = bytearray(hash_body_bytes)
 hashes = hash_struct.from_buffer(rwbytes)
 
 if hashes.header.signature == b'$HASHTBL':
-    print(('Found vendor hash table with {} '
+    print(('Vendor hash table with {} '
            'entries:').format(hashes.header.length))
+
+# On complex Intel ROM images we need to guess the correct volume offset, which
+# is done by checking offset differences of volumes that match venodr sha256.
+vols_offset = 0
+for record in hashes.records:
+    vendor_hash = str(binascii.hexlify(record.hash), 'utf-8')
+    vendor_baseaddr = record.offset
+    if args.debug:
+        print(('DEBUG: Looking for matching sha256 entry pointing to {:X}h'
+               '').format(vendor_baseaddr))
+    match_vol_base = ''
+    match_vols = [vol for vol in ffs_vols if ffs_vols[vol] == vendor_hash]
+    if match_vols:
+        # Some UEFI images (X1Eg2) have duplicated FFS volumes, so we only
+        # consider the last matching volume for our check
+        match_vol_base = int(match_vols[-1], 16)
+        new_offset_guess = match_vol_base - vendor_baseaddr
+        if args.debug and new_offset_guess:
+            print(('DEBUG: Found matching volume @ {:X}h (additional offset: '
+                   '{:X}h bytes)').format(match_vol_base, new_offset_guess))
+        if vols_offset:
+            if vols_offset != new_offset_guess:
+                print('ERROR: Volume offset differs from a previous guess. '
+                      'Bailing out!')
+                sys.exit(2)
+        vols_offset = new_offset_guess
+if args.debug:
+    print(('DEBUG: Assuming additional FFS volume offset of {:X}h bytes'
+           '').format(vols_offset))
 
 fix_needed = False
 for record in hashes.records:
     vendor_hash = str(binascii.hexlify(record.hash), 'utf-8')
     offset, size = record.offset, record.size
-    hex_base = '{:X}'.format(offset)
-    hex_size = '{:X}'.format(size)
+    real_offset = vols_offset + offset
+    hex_base = '{:X}'.format(real_offset)
+    entry_str = '{:7X} (real offset: {:7X}h)'.format(offset, real_offset)
     if args.debug:
-        print('DEBUG: Vendor sha256 entry:', hex_base, hex_size, vendor_hash)
-    if hex_base in ffsv2_vols:
-        real_hash = ffsv2_vols[hex_base]
+        print(('DEBUG: Checking vendor entry pointing @ {}, sha256: {}'
+               '').format(entry_str, vendor_hash))
+    if hex_base in ffs_vols:
+        real_hash = ffs_vols[hex_base]
         if real_hash == vendor_hash:
-            print('FFS volume @ {}h hash256 OK'.format(hex_base))
+            print(' FFS volume @ {} hash256 OK'.format(entry_str))
         else:
-            print(('FFS volume @ {}h hash256 mismatch! Overriding from '
-                   '{} to {}').format(hex_base, vendor_hash, real_hash))
+            print((' FFS volume @ {} hash256 mismatch! Overriding...'
+                   '').format(entry_str))
             hash_buff = bytearray(binascii.unhexlify(real_hash))
             record.hash = (ctypes.c_byte * 32).from_buffer(hash_buff)
             fix_needed = True
